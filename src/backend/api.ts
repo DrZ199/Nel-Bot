@@ -155,42 +155,58 @@ export default {
       if (url.pathname === "/api/todos" && method === "GET") {
         const userId = url.searchParams.get("userId");
         const completed = url.searchParams.get("completed");
-        
-        let filteredTodos = mockTodos;
-        
-        if (userId) {
-          filteredTodos = filteredTodos.filter(t => t.userId === userId);
+        let query = supabaseAdmin.from("todos").select("id, user_id, title, completed, created_at");
+        if (userId) query = query.eq("user_id", userId);
+        if (completed !== null) query = query.eq("completed", completed === "true");
+        const { data, error } = await query;
+        if (error) {
+          return Response.json(
+            { error: error.message },
+            { status: 500, headers: corsHeaders(origin) }
+          );
         }
-        
-        if (completed !== null) {
-          filteredTodos = filteredTodos.filter(t => t.completed === (completed === "true"));
-        }
-        
         return Response.json(
-          { todos: filteredTodos },
+          { todos: data },
           { headers: corsHeaders(origin) }
         );
       }
-      
       // PUT /api/todos/:id - Update todo
       const todoMatch = url.pathname.match(/^\/api\/todos\/(\d+)$/);
       if (todoMatch && method === "PUT") {
         const todoId = todoMatch[1];
-        const body = await request.json() as Partial<TodoItem>;
-        
-        const todoIndex = mockTodos.findIndex(t => t.id === todoId);
-        if (todoIndex === -1) {
+        const body = await request.json();
+        // Zod schema for todo update
+        const todoSchema = z.object({
+          title: z.string().optional(),
+          completed: z.boolean().optional(),
+        });
+        const parseResult = todoSchema.safeParse(body);
+        if (!parseResult.success) {
+          return Response.json(
+            { error: parseResult.error.errors.map(e => e.message).join(", ") },
+            { status: 400, headers: corsHeaders(origin) }
+          );
+        }
+        const { data, error } = await supabaseAdmin
+          .from("todos")
+          .update(parseResult.data)
+          .eq("id", todoId)
+          .select()
+          .single();
+        if (error) {
+          return Response.json(
+            { error: error.message },
+            { status: 500, headers: corsHeaders(origin) }
+          );
+        }
+        if (!data) {
           return Response.json(
             { error: "Todo not found" },
             { status: 404, headers: corsHeaders(origin) }
           );
         }
-        
-        // Update todo
-        mockTodos[todoIndex] = { ...mockTodos[todoIndex], ...body };
-        
         return Response.json(
-          { todo: mockTodos[todoIndex] },
+          { todo: data },
           { headers: corsHeaders(origin) }
         );
       }
