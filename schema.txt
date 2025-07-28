@@ -102,6 +102,19 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- User profiles table for Supabase Auth integration
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY, -- Matches Supabase Auth user id
+    email TEXT NOT NULL UNIQUE,
+    full_name TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Add a foreign key from chat_sessions.user_id to users.id for future user management
+ALTER TABLE chat_sessions
+    ADD CONSTRAINT fk_chat_sessions_user FOREIGN KEY (user_id) REFERENCES users(id);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_nelson_embedding ON nelson_book_of_pediatrics USING ivfflat (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_medical_resource_embedding ON pediatric_medical_resource USING ivfflat (embedding vector_cosine_ops);

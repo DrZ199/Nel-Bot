@@ -3,6 +3,7 @@
 
 // You can import types and utilities (they'll be bundled by esbuild)
 import { z } from "zod";
+import { supabaseAdmin } from "../lib/supabase";
 interface User {
   id: string;
   name: string;
@@ -67,8 +68,18 @@ export default {
       
       // GET /api/users - List all users
       if (url.pathname === "/api/users" && method === "GET") {
+        // Fetch user profiles from Supabase
+        const { data, error } = await supabaseAdmin
+          .from("users")
+          .select("id, email, full_name, created_at, updated_at");
+        if (error) {
+          return Response.json(
+            { error: error.message },
+            { status: 500, headers: corsHeaders(origin) }
+          );
+        }
         return Response.json(
-          { users: mockUsers },
+          { users: data },
           { headers: corsHeaders(origin) }
         );
       }
@@ -92,13 +103,14 @@ export default {
         );
       }
       
-      // POST /api/users - Create new user
+      // POST /api/users - Create new user profile (must already exist in Supabase Auth)
       if (url.pathname === "/api/users" && method === "POST") {
         const body = await request.json();
         // Zod schema for user creation
         const userSchema = z.object({
-          name: z.string().min(1, "Name is required"),
+          id: z.string().uuid(), // Supabase Auth user id
           email: z.string().email("Invalid email address"),
+          full_name: z.string().optional(),
         });
         const parseResult = userSchema.safeParse(body);
         if (!parseResult.success) {
@@ -108,19 +120,33 @@ export default {
           );
         }
         const validBody = parseResult.data;
-        
-        const newUser: User = {
-          id: String(mockUsers.length + 1),
-          name: validBody.name,
-          email: validBody.email,
-          createdAt: new Date().toISOString(),
-        };
-        
-        // In production, you'd save to database here
-        mockUsers.push(newUser);
-        
+        // Check if user exists in Supabase Auth
+        const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.getUserById(validBody.id);
+        if (authError || !authUser || !authUser.user) {
+          return Response.json(
+            { error: "User does not exist in Supabase Auth" },
+            { status: 404, headers: corsHeaders(origin) }
+          );
+        }
+        // Insert or update user profile
+        const { data: upserted, error: upsertError } = await supabaseAdmin
+          .from("users")
+          .upsert({
+            id: validBody.id,
+            email: validBody.email,
+            full_name: validBody.full_name || null,
+            updated_at: new Date().toISOString(),
+          })
+          .select()
+          .single();
+        if (upsertError) {
+          return Response.json(
+            { error: upsertError.message },
+            { status: 500, headers: corsHeaders(origin) }
+          );
+        }
         return Response.json(
-          { user: newUser },
+          { user: upserted },
           { status: 201, headers: corsHeaders(origin) }
         );
       }
