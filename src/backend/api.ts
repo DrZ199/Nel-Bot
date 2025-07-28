@@ -2,6 +2,8 @@
 // This runs on Cloudflare Workers at the edge
 
 // You can import types and utilities (they'll be bundled by esbuild)
+import { z } from "zod";
+import { supabaseAdmin } from "../lib/supabase";
 interface User {
   id: string;
   name: string;
@@ -38,6 +40,16 @@ function corsHeaders(origin: string): HeadersInit {
   };
 }
 
+// Helper to get user from JWT
+async function getUserFromRequest(request: Request) {
+  const authHeader = request.headers.get("Authorization");
+  if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
+  const jwt = authHeader.replace("Bearer ", "");
+  const { data, error } = await supabaseAdmin.auth.getUser(jwt);
+  if (error || !data?.user) return null;
+  return data.user;
+}
+
 // Main worker handler
 export default {
   async fetch(request: Request): Promise<Response> {
@@ -66,8 +78,18 @@ export default {
       
       // GET /api/users - List all users
       if (url.pathname === "/api/users" && method === "GET") {
+        // Fetch user profiles from Supabase
+        const { data, error } = await supabaseAdmin
+          .from("users")
+          .select("id, email, full_name, created_at, updated_at");
+        if (error) {
+          return Response.json(
+            { error: error.message },
+            { status: 500, headers: corsHeaders(origin) }
+          );
+        }
         return Response.json(
-          { users: mockUsers },
+          { users: data },
           { headers: corsHeaders(origin) }
         );
       }
@@ -91,74 +113,131 @@ export default {
         );
       }
       
-      // POST /api/users - Create new user
+      // POST /api/users - Create new user profile (must already exist in Supabase Auth)
       if (url.pathname === "/api/users" && method === "POST") {
-        const body = await request.json() as Partial<User>;
-        
-        // Validate input
-        if (!body.name || !body.email) {
+        const body = await request.json();
+        // Zod schema for user creation
+        const userSchema = z.object({
+          id: z.string().uuid(), // Supabase Auth user id
+          email: z.string().email("Invalid email address"),
+          full_name: z.string().optional(),
+        });
+        const parseResult = userSchema.safeParse(body);
+        if (!parseResult.success) {
           return Response.json(
-            { error: "Name and email are required" },
+            { error: parseResult.error.errors.map(e => e.message).join(", ") },
             { status: 400, headers: corsHeaders(origin) }
           );
         }
-        
-        const newUser: User = {
-          id: String(mockUsers.length + 1),
-          name: body.name,
-          email: body.email,
-          createdAt: new Date().toISOString(),
-        };
-        
-        // In production, you'd save to database here
-        mockUsers.push(newUser);
-        
+        const validBody = parseResult.data;
+        // Check if user exists in Supabase Auth
+        const { data: authUser, error: authError } = await supabaseAdmin.auth.admin.getUserById(validBody.id);
+        if (authError || !authUser || !authUser.user) {
+          return Response.json(
+            { error: "User does not exist in Supabase Auth" },
+            { status: 404, headers: corsHeaders(origin) }
+          );
+        }
+        // Insert or update user profile
+        const { data: upserted, error: upsertError } = await supabaseAdmin
+          .from("users")
+          .upsert({
+            id: validBody.id,
+            email: validBody.email,
+            full_name: validBody.full_name || null,
+            updated_at: new Date().toISOString(),
+          })
+          .select()
+          .single();
+        if (upsertError) {
+          return Response.json(
+            { error: upsertError.message },
+            { status: 500, headers: corsHeaders(origin) }
+          );
+        }
         return Response.json(
-          { user: newUser },
+          { user: upserted },
           { status: 201, headers: corsHeaders(origin) }
         );
       }
       
       // GET /api/todos - List todos with optional filtering
       if (url.pathname === "/api/todos" && method === "GET") {
-        const userId = url.searchParams.get("userId");
+        const user = await getUserFromRequest(request);
+        if (!user) {
+          return Response.json(
+            { error: "Not authenticated" },
+            { status: 401, headers: corsHeaders(origin) }
+          );
+        }
+        const userId = user.id;
         const completed = url.searchParams.get("completed");
-        
-        let filteredTodos = mockTodos;
-        
-        if (userId) {
-          filteredTodos = filteredTodos.filter(t => t.userId === userId);
+        let query = supabaseAdmin.from("todos").select("id, user_id, title, completed, created_at").eq("user_id", userId);
+        if (completed !== null) query = query.eq("completed", completed === "true");
+        const { data, error } = await query;
+        if (error) {
+          return Response.json(
+            { error: error.message },
+            { status: 500, headers: corsHeaders(origin) }
+          );
         }
-        
-        if (completed !== null) {
-          filteredTodos = filteredTodos.filter(t => t.completed === (completed === "true"));
-        }
-        
         return Response.json(
-          { todos: filteredTodos },
+          { todos: data },
           { headers: corsHeaders(origin) }
         );
       }
-      
       // PUT /api/todos/:id - Update todo
       const todoMatch = url.pathname.match(/^\/api\/todos\/(\d+)$/);
       if (todoMatch && method === "PUT") {
+        const user = await getUserFromRequest(request);
+        if (!user) {
+          return Response.json(
+            { error: "Not authenticated" },
+            { status: 401, headers: corsHeaders(origin) }
+          );
+        }
         const todoId = todoMatch[1];
-        const body = await request.json() as Partial<TodoItem>;
-        
-        const todoIndex = mockTodos.findIndex(t => t.id === todoId);
-        if (todoIndex === -1) {
+        // Check ownership
+        const { data: todo, error: todoError } = await supabaseAdmin.from("todos").select("user_id").eq("id", todoId).single();
+        if (todoError || !todo) {
           return Response.json(
             { error: "Todo not found" },
             { status: 404, headers: corsHeaders(origin) }
           );
         }
-        
-        // Update todo
-        mockTodos[todoIndex] = { ...mockTodos[todoIndex], ...body };
-        
+        if (todo.user_id !== user.id) {
+          return Response.json(
+            { error: "Forbidden" },
+            { status: 403, headers: corsHeaders(origin) }
+          );
+        }
+        const body = await request.json();
+        // Zod schema for todo update
+        const todoSchema = z.object({
+          title: z.string().optional(),
+          completed: z.boolean().optional(),
+        });
+        const parseResult = todoSchema.safeParse(body);
+        if (!parseResult.success) {
+          return Response.json(
+            { error: parseResult.error.errors.map(e => e.message).join(", ") },
+            { status: 400, headers: corsHeaders(origin) }
+          );
+        }
+        const { data, error } = await supabaseAdmin
+          .from("todos")
+          .update(parseResult.data)
+          .eq("id", todoId)
+          .select()
+          .single();
+        if (error) {
+          return Response.json(
+            { error: error.message },
+            { status: 500, headers: corsHeaders(origin) }
+          );
+        }
         return Response.json(
-          { todo: mockTodos[todoIndex] },
+          { todo: data },
           { headers: corsHeaders(origin) }
         );
       }
@@ -166,9 +245,17 @@ export default {
       // POST /api/echo - Echo endpoint for testing
       if (url.pathname === "/api/echo" && method === "POST") {
         const body = await request.json();
+        const echoSchema = z.object({ message: z.string() });
+        const parseResult = echoSchema.safeParse(body);
+        if (!parseResult.success) {
+          return Response.json(
+            { error: parseResult.error.errors.map(e => e.message).join(", ") },
+            { status: 400, headers: corsHeaders(origin) }
+          );
+        }
         return Response.json(
           { 
-            echo: body,
+            echo: parseResult.data.message,
             headers: Object.fromEntries(request.headers.entries()),
             timestamp: new Date().toISOString()
           },
