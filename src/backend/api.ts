@@ -245,9 +245,17 @@ export default {
       // POST /api/echo - Echo endpoint for testing
       if (url.pathname === "/api/echo" && method === "POST") {
         const body = await request.json();
+        const echoSchema = z.object({ message: z.string() });
+        const parseResult = echoSchema.safeParse(body);
+        if (!parseResult.success) {
+          return Response.json(
+            { error: parseResult.error.errors.map(e => e.message).join(", ") },
+            { status: 400, headers: corsHeaders(origin) }
+          );
+        }
         return Response.json(
           { 
-            echo: body,
+            echo: parseResult.data.message,
             headers: Object.fromEntries(request.headers.entries()),
             timestamp: new Date().toISOString()
           },
