@@ -2,6 +2,7 @@
 // This runs on Cloudflare Workers at the edge
 
 // You can import types and utilities (they'll be bundled by esbuild)
+import { z } from "zod";
 interface User {
   id: string;
   name: string;
@@ -93,20 +94,25 @@ export default {
       
       // POST /api/users - Create new user
       if (url.pathname === "/api/users" && method === "POST") {
-        const body = await request.json() as Partial<User>;
-        
-        // Validate input
-        if (!body.name || !body.email) {
+        const body = await request.json();
+        // Zod schema for user creation
+        const userSchema = z.object({
+          name: z.string().min(1, "Name is required"),
+          email: z.string().email("Invalid email address"),
+        });
+        const parseResult = userSchema.safeParse(body);
+        if (!parseResult.success) {
           return Response.json(
-            { error: "Name and email are required" },
+            { error: parseResult.error.errors.map(e => e.message).join(", ") },
             { status: 400, headers: corsHeaders(origin) }
           );
         }
+        const validBody = parseResult.data;
         
         const newUser: User = {
           id: String(mockUsers.length + 1),
-          name: body.name,
-          email: body.email,
+          name: validBody.name,
+          email: validBody.email,
           createdAt: new Date().toISOString(),
         };
         
