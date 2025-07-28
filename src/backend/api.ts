@@ -40,6 +40,16 @@ function corsHeaders(origin: string): HeadersInit {
   };
 }
 
+// Helper to get user from JWT
+async function getUserFromRequest(request: Request) {
+  const authHeader = request.headers.get("Authorization");
+  if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
+  const jwt = authHeader.replace("Bearer ", "");
+  const { data, error } = await supabaseAdmin.auth.getUser(jwt);
+  if (error || !data?.user) return null;
+  return data.user;
+}
+
 // Main worker handler
 export default {
   async fetch(request: Request): Promise<Response> {
@@ -153,10 +163,16 @@ export default {
       
       // GET /api/todos - List todos with optional filtering
       if (url.pathname === "/api/todos" && method === "GET") {
-        const userId = url.searchParams.get("userId");
+        const user = await getUserFromRequest(request);
+        if (!user) {
+          return Response.json(
+            { error: "Not authenticated" },
+            { status: 401, headers: corsHeaders(origin) }
+          );
+        }
+        const userId = user.id;
         const completed = url.searchParams.get("completed");
-        let query = supabaseAdmin.from("todos").select("id, user_id, title, completed, created_at");
-        if (userId) query = query.eq("user_id", userId);
+        let query = supabaseAdmin.from("todos").select("id, user_id, title, completed, created_at").eq("user_id", userId);
         if (completed !== null) query = query.eq("completed", completed === "true");
         const { data, error } = await query;
         if (error) {
@@ -173,7 +189,28 @@ export default {
       // PUT /api/todos/:id - Update todo
       const todoMatch = url.pathname.match(/^\/api\/todos\/(\d+)$/);
       if (todoMatch && method === "PUT") {
+        const user = await getUserFromRequest(request);
+        if (!user) {
+          return Response.json(
+            { error: "Not authenticated" },
+            { status: 401, headers: corsHeaders(origin) }
+          );
+        }
         const todoId = todoMatch[1];
+        // Check ownership
+        const { data: todo, error: todoError } = await supabaseAdmin.from("todos").select("user_id").eq("id", todoId).single();
+        if (todoError || !todo) {
+          return Response.json(
+            { error: "Todo not found" },
+            { status: 404, headers: corsHeaders(origin) }
+          );
+        }
+        if (todo.user_id !== user.id) {
+          return Response.json(
+            { error: "Forbidden" },
+            { status: 403, headers: corsHeaders(origin) }
+          );
+        }
         const body = await request.json();
         // Zod schema for todo update
         const todoSchema = z.object({
@@ -197,12 +234,6 @@ export default {
           return Response.json(
             { error: error.message },
             { status: 500, headers: corsHeaders(origin) }
-          );
-        }
-        if (!data) {
-          return Response.json(
-            { error: "Todo not found" },
-            { status: 404, headers: corsHeaders(origin) }
           );
         }
         return Response.json(
